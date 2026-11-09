@@ -1,0 +1,23 @@
+ODDS PDF EXPORTER — como instalar e usar
+
+INSTALAR (Chrome / Edge / Brave)
+1. Descompacte a pasta "odds-pdf-exporter".
+2. Abra chrome://extensions  e ligue o "Modo do desenvolvedor".
+3. Clique em "Carregar sem compactação" e escolha a pasta.
+
+USAR
+1. Abra a página da lista de jogos (a URL precisa ter /betting/...).
+   Se a extensão foi instalada com a página já aberta, aperte F5.
+2. Clique no ícone da extensão. A lista 05–15 já vem preenchida; edite se quiser.
+   Formato: "05. Holanda × Grécia" (aceita ×, x, vs, -). A ordem dos times não importa.
+3. Marque "Modo teste" na primeira vez para gerar só 1 PDF e conferir.
+4. Clique em Iniciar. Deixe a aba aberta e visível; não mexa nela até terminar.
+5. Os PDFs caem na pasta Downloads com o nome 05.pdf, 06.pdf...
+
+OBSERVAÇÕES
+- O Chrome mostra a faixa "Odds PDF Exporter começou a depurar este navegador".
+  É normal: é assim que o PDF de página única é gerado. Ela some ao terminar.
+- Se os mercados não expandirem, clique com o botão direito num cabeçalho de
+  mercado > Inspecionar, descubra uma classe CSS e coloque no campo
+  "Seletor CSS extra" (ex.: [class*=market-title]).
+- O botão Parar interrompe no jogo atual.
