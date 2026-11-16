@@ -146,19 +146,40 @@
     realClick(el);
     return true;
   }
+  const hasSize = r => r.width > 0 && r.height > 0;
+  // Reconsulta o DOM e localiza de novo o cartão pelo ID. A lista de apostas parece reciclar
+  // elementos conforme rola (virtualização): a referência capturada antes de rolar pode ficar
+  // "morta" (desconectada) ou passar a representar outro item por quando formos clicar.
+  async function relocateCard(id, hintEl) {
+    for (let i = 0; i < 5; i++) {
+      const found = findBetCards().find(c => c.id === id);
+      if (found && hasSize(found.container.getBoundingClientRect())) return found;
+      if (hintEl && hintEl.isConnected) hintEl.scrollIntoView({ block: 'center' });
+      await sleep(400);
+    }
+    return null;
+  }
   // Tenta abrir a tela de detalhe de um cartão: primeiro clicando em pontos visíveis do cartão
   // (cobre o caso de overlay clicável), depois subindo pelos ancestrais do cabeçalho (cobre o
   // caso de o próprio contêiner ter o onClick).
   async function openDetail(card) {
     const before = location.href;
-    const rects = [card.dateEl.getBoundingClientRect(), card.idEl.getBoundingClientRect(), card.container.getBoundingClientRect()];
-    const points = rects.map(r => [r.left + Math.min(r.width, 20) / 2, r.top + r.height / 2]);
-    const full = card.container.parentElement || card.container;
-    const rFull = full.getBoundingClientRect();
-    points.push([rFull.left + 20, rFull.top + rFull.height * 0.6]);
+    const headerR = card.container.getBoundingClientRect();
+    const fullEl = card.container.parentElement || card.container;
+    const fullR = fullEl.getBoundingClientRect();
+    const points = [];
+    if (hasSize(headerR)) {
+      points.push([headerR.left + 20, headerR.top + headerR.height / 2]);
+      points.push([headerR.left + headerR.width / 2, headerR.top + headerR.height / 2]);
+    }
+    if (hasSize(fullR)) {
+      points.push([fullR.left + 20, fullR.top + fullR.height * 0.5]);
+      points.push([fullR.left + fullR.width / 2, fullR.top + fullR.height * 0.5]);
+      points.push([fullR.left + 20, fullR.top + fullR.height * 0.75]);
+    }
 
     for (const [x, y] of points) {
-      if (x < 0 || y < 0) continue;
+      if (x <= 0 || y <= 0) continue;
       if (!clickAt(x, y)) continue;
       const opened = await waitUntil(() => location.href !== before || isDetailPage(), 1500);
       if (opened) return true;
@@ -233,13 +254,53 @@
     restoreList = [];
   }
 
-  async function backToList() {
+  async function backToListByClick() {
     if (!isDetailPage()) return true;
     const btn = findBackButton();
     if (btn) realClick(btn); else history.back();
     let ok = await waitUntil(() => !isDetailPage(), 6000);
     if (!ok) { history.back(); ok = await waitUntil(() => !isDetailPage(), 4000); }
     return ok;
+  }
+  // Volta para a lista navegando de verdade (history.back). Se o Chrome conseguir restaurar a
+  // página anterior pelo cache de voltar/avançar (bfcache), isso é instantâneo e preserva a
+  // posição de rolagem; caso contrário recarrega a URL da lista como alternativa.
+  async function goBackToList(listUrl) {
+    const before = location.href;
+    history.back();
+    const moved = await waitUntil(() => location.href !== before, 3000);
+    if (!moved && listUrl) location.href = listUrl;
+  }
+
+  // ---------- URL direta da aposta (aprendida a partir do 1º clique bem-sucedido) ----------
+  // Guardada fora do estado da busca atual (chave própria), para valer também em buscas futuras.
+  const PLACEHOLDER = '__ID__';
+  const getTemplate = () => new Promise(r => chrome.storage.local.get('apostasUrlTemplate', v => r(v.apostasUrlTemplate || null)));
+  const setTemplate = tmpl => new Promise(r => chrome.storage.local.set({ apostasUrlTemplate: tmpl }, r));
+  function learnTemplate(id) {
+    const href = location.href;
+    const idx = href.indexOf(id);
+    if (idx < 0) return null;
+    return href.slice(0, idx) + PLACEHOLDER + href.slice(idx + id.length);
+  }
+
+  function tagFor(id, date) {
+    const time = date.hour != null ? `${pad2(date.hour)}:${pad2(date.minute)}` : '';
+    return `ID ${id} (${pad2(date.day)}/${pad2(date.month)}/${date.year} ${time})`;
+  }
+
+  async function printCurrentDetail(id, date) {
+    await waitStable();
+    const idsHere = findIdLeaves().map(x => x.id);
+    if (idsHere.length && !idsHere.includes(id)) {
+      await log(`${tagFor(id, date)}: aviso – ID da tela de detalhe não confere com o esperado, seguindo mesmo assim.`);
+    }
+    const dims = await preparePrint();
+    const filename = fileStamp(date, id);
+    const res = await chrome.runtime.sendMessage({ type: 'PRINT', filename, ...dims });
+    restorePrint();
+    if (!res || !res.ok) throw new Error('falha ao gerar PDF: ' + (res && res.error));
+    return filename;
   }
 
   const progress = i => chrome.runtime.sendMessage({ type: 'PROGRESS', text: i ? `apostas: ${i}` : '' });
@@ -250,14 +311,40 @@
     window.__oddsApostasRunning = true;
     try {
       let st = await getState();
-      let ok = 0, fail = 0, noGrowth = 0, scans = 0;
-      while (st && st.running) {
-        if (isDetailPage()) {
-          await backToList();
-          st = await getState();
-          continue;
-        }
+      if (!st || !st.running) return;
 
+      // Acabamos de chegar (navegação direta pela URL aprendida) na tela de detalhe esperada.
+      if (st.navigating) {
+        const { id, date } = st.navigating;
+        const arrived = await waitUntil(isDetailPage, 6000);
+        if (arrived) {
+          try {
+            const filename = await printCurrentDetail(id, date);
+            await log(`${tagFor(id, date)}: OK → ${filename}`);
+            await setState({ ok: (st.ok || 0) + 1 });
+          } catch (e) {
+            restorePrint();
+            await log(`${tagFor(id, date)}: FALHOU – ${e.message}`);
+            await setState({ fail: (st.fail || 0) + 1 });
+          }
+        } else {
+          await log(`${tagFor(id, date)}: FALHOU – a navegação direta pela URL não abriu a tela de detalhe.`);
+          await setState({ fail: (st.fail || 0) + 1 });
+        }
+        const processed = new Set(st.processedIds || []);
+        processed.add(id);
+        await setState({ processedIds: [...processed], navigating: null });
+        await goBackToList(st.listUrl);
+        return; // a navegação acima recarrega/retoma a página; o listener de pageshow chama run() de novo
+      }
+      // Tela de detalhe sem navegação esperada em andamento: apenas volta para a lista.
+      if (isDetailPage()) {
+        await backToListByClick();
+        st = await getState();
+      }
+
+      let noGrowth = 0, scans = 0;
+      while (st && st.running) {
         const target = st.targetDate;
         const cards = findBetCards();
         scans++;
@@ -267,31 +354,39 @@
 
         if (pending) {
           progress(processed.size + 1);
-          const tag = `ID ${pending.id} (${pad2(pending.date.day)}/${pad2(pending.date.month)}/${pending.date.year} ${pending.date.hour != null ? pad2(pending.date.hour) + ':' + pad2(pending.date.minute) : ''})`;
+          const tag = tagFor(pending.id, pending.date);
+          const tmpl = await getTemplate();
+
+          if (tmpl) {
+            // Já sabemos o formato da URL de detalhe: navega direto por ela, sem clicar em nada.
+            await setState({ navigating: { id: pending.id, date: pending.date }, listUrl: st.listUrl || location.href });
+            location.href = tmpl.replace(PLACEHOLDER, pending.id);
+            return; // idem: a página vai (re)carregar e o pageshow retoma o processo
+          }
+
+          // Ainda não conhecemos a URL: clica para abrir e, de quebra, aprende o padrão da URL.
           try {
             pending.container.scrollIntoView({ block: 'center' });
-            await sleep(300);
-            const opened = await openDetail(pending);
+            await sleep(400);
+            const fresh = (await relocateCard(pending.id, pending.container)) || pending;
+            const opened = await openDetail(fresh);
+            if (!opened) throw new Error('clique não abriu a tela de detalhe');
             await waitStable();
-            if (!opened && !isDetailPage()) throw new Error('clique não abriu a tela de detalhe');
-
-            const dims = await preparePrint();
-            const filename = fileStamp(pending.date, pending.id);
-            const res = await chrome.runtime.sendMessage({ type: 'PRINT', filename, ...dims });
-            restorePrint();
-            if (!res || !res.ok) throw new Error('falha ao gerar PDF: ' + (res && res.error));
+            const learned = learnTemplate(pending.id);
+            if (learned) { await setTemplate(learned); await log(`URL de detalhe identificada; próximas apostas serão abertas direto por ela.`); }
+            const filename = await printCurrentDetail(pending.id, pending.date);
             await log(`${tag}: OK → ${filename}`);
-            ok++;
+            await setState({ ok: (st.ok || 0) + 1 });
           } catch (e) {
             restorePrint();
             await log(`${tag}: FALHOU – ${e.message}`);
-            fail++;
+            await setState({ fail: (st.fail || 0) + 1 });
           }
           processed.add(pending.id);
           await setState({ processedIds: [...processed] });
-          await backToList();
+          await backToListByClick();
           st = await getState();
-          await sleep(500);
+          await sleep(400);
           continue;
         }
 
@@ -303,11 +398,12 @@
 
         const oldestLoaded = cards.length ? cards.reduce((a, b) => (dateKey(a.date) < dateKey(b.date) ? a : b)) : null;
         const passedTarget = oldestLoaded && dateKey(oldestLoaded.date) < dateKey(target);
+        const done = (st.ok || 0) + (st.fail || 0);
 
-        if (noGrowth >= 4 || (passedTarget && (ok + fail > 0 || noGrowth >= 2))) {
+        if (noGrowth >= 4 || (passedTarget && (done > 0 || noGrowth >= 2))) {
           await setState({ running: false });
-          await log(ok + fail > 0
-            ? `Concluído. OK: ${ok}, falhas: ${fail}.`
+          await log(done > 0
+            ? `Concluído. OK: ${st.ok || 0}, falhas: ${st.fail || 0}.`
             : `Nenhuma aposta encontrada na data informada.`);
           break;
         }
@@ -323,7 +419,8 @@
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     if (msg.type === 'APOSTAS_START') {
       setState({
-        running: true, targetDate: msg.targetDate, processedIds: [],
+        running: true, targetDate: msg.targetDate, processedIds: [], navigating: null,
+        listUrl: location.href, ok: 0, fail: 0,
         log: [`Iniciando busca de apostas em ${pad2(msg.targetDate.day)}/${pad2(msg.targetDate.month)}/${msg.targetDate.year}…`]
       }).then(() => { run(); sendResponse({ ok: true }); });
       return true;
@@ -335,6 +432,10 @@
     if (msg.type === 'APOSTAS_PING') { sendResponse({ ok: true, url: location.href }); }
   });
 
-  // retoma depois de recarregar a página
-  getState().then(st => { if (st && st.running) setTimeout(run, 1500); });
+  // Retoma depois de a página (re)carregar — inclusive quando restaurada do cache de
+  // voltar/avançar (bfcache), caso em que o script não é reexecutado do zero, mas o evento
+  // "pageshow" dispara mesmo assim.
+  window.addEventListener('pageshow', () => {
+    getState().then(st => { if (st && st.running) setTimeout(run, 1200); });
+  });
 })();
