@@ -288,15 +288,6 @@
     if (!ok) { history.back(); ok = await waitUntil(() => !isDetailPage(), 4000); }
     return ok;
   }
-  // Volta para a lista navegando de verdade (history.back). Se o Chrome conseguir restaurar a
-  // página anterior pelo cache de voltar/avançar (bfcache), isso é instantâneo e preserva a
-  // posição de rolagem; caso contrário recarrega a URL da lista como alternativa.
-  async function goBackToList(listUrl) {
-    const before = location.href;
-    history.back();
-    const moved = await waitUntil(() => location.href !== before, 3000);
-    if (!moved && listUrl) location.href = listUrl;
-  }
 
   // ---------- URL direta da aposta ----------
   // Preferência: usar o href real encontrado no HTML do cartão (templateFromHref). Se não houver
@@ -338,129 +329,159 @@
     return filename;
   }
 
-  const progress = i => chrome.runtime.sendMessage({ type: 'PROGRESS', text: i ? `apostas: ${i}` : '' });
+  const progress = (i, n) => chrome.runtime.sendMessage({ type: 'PROGRESS', text: n ? `apostas: ${i}/${n}` : '' });
+
+  // Resolve a URL de detalhe de um item da fila: prefere o href real já capturado durante a
+  // coleta; cai para o template aprendido (desta busca ou de uma anterior) se precisar.
+  async function resolveUrl(item) {
+    if (item.href) {
+      const abs = new URL(item.href, location.href).href;
+      if (abs.includes(item.id)) return abs;
+    }
+    const tmpl = await getTemplate();
+    if (tmpl) {
+      const u = tmpl.replace(PLACEHOLDER, item.id);
+      if (u.includes(item.id)) return u;
+    }
+    return null;
+  }
+
+  // Clica nesta aposta (ainda na lista) só para descobrir o padrão da URL de detalhe, quando o
+  // HTML do cartão não trouxe um link direto. É o único momento em que ainda se clica — acontece
+  // no máximo uma vez por busca, durante a coleta, nunca durante o processamento da fila.
+  async function bootstrapHref(card) {
+    try {
+      card.container.scrollIntoView({ block: 'center' });
+      await sleep(400);
+      const fresh = (await relocateCard(card.id, card.container)) || card;
+      const opened = await openDetail(fresh);
+      if (!opened) return null;
+      await waitStable();
+      const learned = learnTemplate(card.id);
+      if (learned) { await setTemplate(learned); await log('URL de detalhe identificada; as apostas serão abertas direto por ela.'); }
+      return location.href;
+    } finally {
+      await backToListByClick();
+    }
+  }
+
+  // Avança pela fila a partir de queueIndex até achar um item navegável (ou ela acabar),
+  // navegando direto para a tela de detalhe dele — sem passar pela lista de novo.
+  async function goToNextNavigable(fromIndex) {
+    let st = await getState();
+    let idx = fromIndex;
+    while (idx < st.queue.length) {
+      const item = st.queue[idx];
+      const url = await resolveUrl(item);
+      if (url) {
+        await setState({ queueIndex: idx });
+        location.href = url;
+        return;
+      }
+      await log(`${tagFor(item.id, item.date)}: FALHOU – não foi possível determinar a URL desta aposta.`);
+      await setState({ fail: (st.fail || 0) + 1 });
+      st = await getState();
+      idx++;
+    }
+    await setState({ queueIndex: idx, running: false });
+    await log(`Concluído. OK: ${st.ok || 0}, falhas: ${st.fail || 0}.`);
+    progress(0, 0);
+  }
+
+  // Fase 2: já estamos (ou deveríamos estar) na tela de detalhe do item st.queueIndex. Imprime e
+  // segue direto para o próximo item da fila, sem voltar para a lista entre um e outro.
+  async function processQueueItem(st) {
+    const item = st.queue[st.queueIndex];
+    progress(st.queueIndex + 1, st.queue.length);
+    const arrived = await waitUntil(isDetailPage, 10000);
+    if (arrived) {
+      try {
+        const filename = await printCurrentDetail(item.id, item.date);
+        await log(`${tagFor(item.id, item.date)}: OK → ${filename}`);
+        await setState({ ok: (st.ok || 0) + 1 });
+      } catch (e) {
+        restorePrint();
+        await log(`${tagFor(item.id, item.date)}: FALHOU – ${e.message}`);
+        await setState({ fail: (st.fail || 0) + 1 });
+      }
+    } else {
+      await log(`${tagFor(item.id, item.date)}: FALHOU – a navegação direta não abriu a tela de detalhe.`);
+      await setState({ fail: (st.fail || 0) + 1 });
+    }
+    await goToNextNavigable(st.queueIndex + 1);
+  }
+
+  // Fase 1: rola a lista inteira uma única vez, juntando todos os IDs/links da data pedida numa
+  // fila. Só depois de terminar de coletar é que começa a abrir as telas de detalhe.
+  async function collectQueueThenStart(st) {
+    if (isDetailPage()) { await backToListByClick(); st = await getState(); }
+
+    const target = st.targetDate;
+    const queue = st.queue ? [...st.queue] : [];
+    const seen = new Set(queue.map(q => q.id));
+    let noGrowth = 0, scans = 0;
+
+    while (st && st.running) {
+      let cards = findBetCards();
+      scans++;
+      if (scans === 1 && cards.length === 0) {
+        // a lista pode ainda estar carregando logo após voltar de uma aposta ou recarregar
+        await waitUntil(() => findIdLeaves().length > 0, 12000);
+        cards = findBetCards();
+      }
+      if (scans === 1) await log(`${cards.length} cartão(ões) de aposta reconhecido(s) nesta tela.`);
+
+      for (const c of cards) {
+        if (!sameDay(c.date, target) || seen.has(c.id)) continue;
+        seen.add(c.id);
+        let href = c.href;
+        if (href) {
+          const tmpl = templateFromHref(href, c.id);
+          if (tmpl) await setTemplate(tmpl);
+        } else if (!(await getTemplate())) {
+          href = await bootstrapHref(c);
+        }
+        queue.push({ id: c.id, date: c.date, href: href || null });
+        await setState({ queue });
+        await log(`${tagFor(c.id, c.date)}: adicionada à fila (${queue.length} até agora).`);
+      }
+
+      const before = findIdLeaves().length;
+      await scrollMore();
+      const after = findIdLeaves().length;
+      noGrowth = after > before ? 0 : noGrowth + 1;
+
+      const oldestLoaded = cards.length ? cards.reduce((a, b) => (dateKey(a.date) < dateKey(b.date) ? a : b)) : null;
+      const passedTarget = oldestLoaded && dateKey(oldestLoaded.date) < dateKey(target);
+
+      if (noGrowth >= 6 || (passedTarget && (queue.length > 0 || noGrowth >= 3))) break;
+      st = await getState();
+      if (!st || !st.running) return;
+    }
+
+    if (!queue.length) {
+      await setState({ running: false });
+      await log('Nenhuma aposta encontrada na data informada.');
+      return;
+    }
+    await log(`${queue.length} aposta(s) encontrada(s) na data informada. Baixando os PDFs…`);
+    await setState({ phase: 'process', queue, queueIndex: 0 });
+    await goToNextNavigable(0);
+  }
 
   // ---------- laço principal ----------
   async function run() {
     if (window.__oddsApostasRunning) return;
     window.__oddsApostasRunning = true;
     try {
-      let st = await getState();
+      const st = await getState();
       if (!st || !st.running) return;
 
-      // Acabamos de chegar (navegação direta pela URL aprendida) na tela de detalhe esperada.
-      if (st.navigating) {
-        const { id, date } = st.navigating;
-        const arrived = await waitUntil(isDetailPage, 10000);
-        if (arrived) {
-          try {
-            const filename = await printCurrentDetail(id, date);
-            await log(`${tagFor(id, date)}: OK → ${filename}`);
-            await setState({ ok: (st.ok || 0) + 1 });
-          } catch (e) {
-            restorePrint();
-            await log(`${tagFor(id, date)}: FALHOU – ${e.message}`);
-            await setState({ fail: (st.fail || 0) + 1 });
-          }
-        } else {
-          await log(`${tagFor(id, date)}: FALHOU – a navegação direta pela URL não abriu a tela de detalhe.`);
-          await setState({ fail: (st.fail || 0) + 1 });
-        }
-        const processed = new Set(st.processedIds || []);
-        processed.add(id);
-        await setState({ processedIds: [...processed], navigating: null });
-        await goBackToList(st.listUrl);
-        return; // a navegação acima recarrega/retoma a página; o listener de pageshow chama run() de novo
+      if (st.phase === 'process' && st.queue && st.queueIndex < st.queue.length) {
+        await processQueueItem(st);
+      } else {
+        await collectQueueThenStart(st);
       }
-      // Tela de detalhe sem navegação esperada em andamento: apenas volta para a lista.
-      if (isDetailPage()) {
-        await backToListByClick();
-        st = await getState();
-      }
-
-      let noGrowth = 0, scans = 0;
-      while (st && st.running) {
-        const target = st.targetDate;
-        let cards = findBetCards();
-        scans++;
-        if (scans === 1 && cards.length === 0) {
-          // a lista pode ainda estar carregando logo após voltar de uma aposta ou recarregar
-          await waitUntil(() => findIdLeaves().length > 0, 12000);
-          cards = findBetCards();
-        }
-        if (scans === 1) await log(`${cards.length} cartão(ões) de aposta reconhecido(s) nesta tela.`);
-        const processed = new Set(st.processedIds || []);
-        const pending = cards.find(c => sameDay(c.date, target) && !processed.has(c.id));
-
-        if (pending) {
-          progress(processed.size + 1);
-          const tag = tagFor(pending.id, pending.date);
-
-          // Preferência 1: link real já presente no HTML do cartão (sem precisar clicar nem adivinhar).
-          let url = null;
-          if (pending.href && pending.href.includes(pending.id)) {
-            url = new URL(pending.href, location.href).href;
-            const tmplFromHref = templateFromHref(pending.href, pending.id);
-            if (tmplFromHref) await setTemplate(tmplFromHref);
-          } else {
-            // Preferência 2: template aprendido anteriormente (desta busca ou de uma anterior).
-            const tmpl = await getTemplate();
-            if (tmpl) url = tmpl.replace(PLACEHOLDER, pending.id);
-          }
-
-          if (url && url.includes(pending.id)) {
-            await setState({ navigating: { id: pending.id, date: pending.date }, listUrl: st.listUrl || location.href });
-            location.href = url;
-            return; // a página vai (re)carregar e o pageshow retoma o processo
-          }
-
-          // Último recurso: nem achamos link no HTML nem temos template aprendido. Clica para
-          // abrir e, de quebra, aprende o padrão da URL para as próximas apostas.
-          try {
-            pending.container.scrollIntoView({ block: 'center' });
-            await sleep(400);
-            const fresh = (await relocateCard(pending.id, pending.container)) || pending;
-            const opened = await openDetail(fresh);
-            if (!opened) throw new Error('clique não abriu a tela de detalhe');
-            await waitStable();
-            const learned = learnTemplate(pending.id);
-            if (learned) { await setTemplate(learned); await log(`URL de detalhe identificada; próximas apostas serão abertas direto por ela.`); }
-            const filename = await printCurrentDetail(pending.id, pending.date);
-            await log(`${tag}: OK → ${filename}`);
-            await setState({ ok: (st.ok || 0) + 1 });
-          } catch (e) {
-            restorePrint();
-            await log(`${tag}: FALHOU – ${e.message}`);
-            await setState({ fail: (st.fail || 0) + 1 });
-          }
-          processed.add(pending.id);
-          await setState({ processedIds: [...processed] });
-          await backToListByClick();
-          st = await getState();
-          await sleep(400);
-          continue;
-        }
-
-        // nenhuma aposta pendente visível: tenta carregar mais rolando a lista
-        const before = findIdLeaves().length;
-        await scrollMore();
-        const after = findIdLeaves().length;
-        noGrowth = after > before ? 0 : noGrowth + 1;
-
-        const oldestLoaded = cards.length ? cards.reduce((a, b) => (dateKey(a.date) < dateKey(b.date) ? a : b)) : null;
-        const passedTarget = oldestLoaded && dateKey(oldestLoaded.date) < dateKey(target);
-        const done = (st.ok || 0) + (st.fail || 0);
-
-        if (noGrowth >= 6 || (passedTarget && (done > 0 || noGrowth >= 3))) {
-          await setState({ running: false });
-          await log(done > 0
-            ? `Concluído. OK: ${st.ok || 0}, falhas: ${st.fail || 0}.`
-            : `Nenhuma aposta encontrada na data informada.`);
-          break;
-        }
-        st = await getState();
-      }
-      progress(0);
     } finally {
       window.__oddsApostasRunning = false;
     }
@@ -470,7 +491,7 @@
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     if (msg.type === 'APOSTAS_START') {
       setState({
-        running: true, targetDate: msg.targetDate, processedIds: [], navigating: null,
+        running: true, targetDate: msg.targetDate, phase: 'collect', queue: [], queueIndex: 0,
         listUrl: location.href, ok: 0, fail: 0,
         log: [`Iniciando busca de apostas em ${pad2(msg.targetDate.day)}/${pad2(msg.targetDate.month)}/${msg.targetDate.year}…`]
       }).then(() => { run(); sendResponse({ ok: true }); });
