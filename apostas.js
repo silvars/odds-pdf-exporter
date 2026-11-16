@@ -77,6 +77,21 @@
     return minimalMatches(txt => /^ID\s+\d+/i.test(txt), 40)
       .map(el => ({ el, id: el.textContent.trim().match(/^ID\s+(\d+)/i)[1] }));
   }
+  // Procura um link real (<a href>) para a tela de detalhe deste cartão: primeiro verifica se o
+  // próprio cabeçalho ou algum ancestral é um link; depois procura dentro do wrapper imediato do
+  // cartão (cobre o caso comum de um link transparente sobreposto ao cartão inteiro).
+  function findDetailHref(container) {
+    let el = container;
+    for (let i = 0; el && i < 10; i++, el = el.parentElement) {
+      if (el.tagName === 'A' && el.hasAttribute('href')) return el.getAttribute('href');
+    }
+    const wrap = container.parentElement;
+    if (wrap) {
+      const a = wrap.querySelector('a[href]');
+      if (a) return a.getAttribute('href');
+    }
+    return null;
+  }
   // Emparelha cada data com o ID mais próximo (menor ancestral comum), formando os cartões da lista.
   function findBetCards() {
     const dateLeaves = findDateLeaves();
@@ -93,7 +108,10 @@
           }
         }
       }
-      if (best) cards.push({ dateEl: d.el, date: d.date, idEl: best.idInfo.el, id: best.idInfo.id, container: best.container });
+      if (best) cards.push({
+        dateEl: d.el, date: d.date, idEl: best.idInfo.el, id: best.idInfo.id,
+        container: best.container, href: findDetailHref(best.container)
+      });
     }
     return cards;
   }
@@ -125,7 +143,7 @@
   }
   async function scrollMore() {
     for (const s of scrollers()) s.scrollTop += Math.max(400, s.clientHeight * 0.8);
-    await sleep(600);
+    await sleep(900);
   }
 
   // ---------- cliques ----------
@@ -272,16 +290,23 @@
     if (!moved && listUrl) location.href = listUrl;
   }
 
-  // ---------- URL direta da aposta (aprendida a partir do 1º clique bem-sucedido) ----------
-  // Guardada fora do estado da busca atual (chave própria), para valer também em buscas futuras.
+  // ---------- URL direta da aposta ----------
+  // Preferência: usar o href real encontrado no HTML do cartão (templateFromHref). Se não houver
+  // link no HTML, cai para um template aprendido antes a partir de uma navegação bem-sucedida
+  // (guardado fora do estado da busca atual, valendo também para buscas futuras).
   const PLACEHOLDER = '__ID__';
   const getTemplate = () => new Promise(r => chrome.storage.local.get('apostasUrlTemplate', v => r(v.apostasUrlTemplate || null)));
   const setTemplate = tmpl => new Promise(r => chrome.storage.local.set({ apostasUrlTemplate: tmpl }, r));
-  function learnTemplate(id) {
-    const href = location.href;
-    const idx = href.indexOf(id);
+  function templateFromHref(href, id) {
+    const abs = new URL(href, location.href).href;
+    const idx = abs.indexOf(id);
     if (idx < 0) return null;
-    return href.slice(0, idx) + PLACEHOLDER + href.slice(idx + id.length);
+    return abs.slice(0, idx) + PLACEHOLDER + abs.slice(idx + id.length);
+  }
+  function learnTemplate(id) {
+    const idx = location.href.indexOf(id);
+    if (idx < 0) return null;
+    return location.href.slice(0, idx) + PLACEHOLDER + location.href.slice(idx + id.length);
   }
 
   function tagFor(id, date) {
@@ -346,8 +371,13 @@
       let noGrowth = 0, scans = 0;
       while (st && st.running) {
         const target = st.targetDate;
-        const cards = findBetCards();
+        let cards = findBetCards();
         scans++;
+        if (scans === 1 && cards.length === 0) {
+          // a lista pode ainda estar carregando logo após voltar de uma aposta ou recarregar
+          await waitUntil(() => findIdLeaves().length > 0, 8000);
+          cards = findBetCards();
+        }
         if (scans === 1) await log(`${cards.length} cartão(ões) de aposta reconhecido(s) nesta tela.`);
         const processed = new Set(st.processedIds || []);
         const pending = cards.find(c => sameDay(c.date, target) && !processed.has(c.id));
@@ -355,16 +385,27 @@
         if (pending) {
           progress(processed.size + 1);
           const tag = tagFor(pending.id, pending.date);
-          const tmpl = await getTemplate();
 
-          if (tmpl) {
-            // Já sabemos o formato da URL de detalhe: navega direto por ela, sem clicar em nada.
-            await setState({ navigating: { id: pending.id, date: pending.date }, listUrl: st.listUrl || location.href });
-            location.href = tmpl.replace(PLACEHOLDER, pending.id);
-            return; // idem: a página vai (re)carregar e o pageshow retoma o processo
+          // Preferência 1: link real já presente no HTML do cartão (sem precisar clicar nem adivinhar).
+          let url = null;
+          if (pending.href) {
+            url = new URL(pending.href, location.href).href;
+            const tmplFromHref = templateFromHref(pending.href, pending.id);
+            if (tmplFromHref) await setTemplate(tmplFromHref);
+          } else {
+            // Preferência 2: template aprendido anteriormente (desta busca ou de uma anterior).
+            const tmpl = await getTemplate();
+            if (tmpl) url = tmpl.replace(PLACEHOLDER, pending.id);
           }
 
-          // Ainda não conhecemos a URL: clica para abrir e, de quebra, aprende o padrão da URL.
+          if (url) {
+            await setState({ navigating: { id: pending.id, date: pending.date }, listUrl: st.listUrl || location.href });
+            location.href = url;
+            return; // a página vai (re)carregar e o pageshow retoma o processo
+          }
+
+          // Último recurso: nem achamos link no HTML nem temos template aprendido. Clica para
+          // abrir e, de quebra, aprende o padrão da URL para as próximas apostas.
           try {
             pending.container.scrollIntoView({ block: 'center' });
             await sleep(400);
@@ -400,7 +441,7 @@
         const passedTarget = oldestLoaded && dateKey(oldestLoaded.date) < dateKey(target);
         const done = (st.ok || 0) + (st.fail || 0);
 
-        if (noGrowth >= 4 || (passedTarget && (done > 0 || noGrowth >= 2))) {
+        if (noGrowth >= 6 || (passedTarget && (done > 0 || noGrowth >= 3))) {
           await setState({ running: false });
           await log(done > 0
             ? `Concluído. OK: ${st.ok || 0}, falhas: ${st.fail || 0}.`
