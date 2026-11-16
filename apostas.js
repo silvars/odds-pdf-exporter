@@ -234,8 +234,8 @@
       const len = document.body.innerText.length;
       same = len === last ? same + 1 : 0;
       last = len;
-      if (same >= 3 && len > 100) return true;
-      await sleep(500);
+      if (same >= 4 && len > 100) return true;
+      await sleep(600);
     }
     return false;
   }
@@ -323,10 +323,12 @@
   }
 
   async function printCurrentDetail(id, date) {
-    await waitStable();
-    const idsHere = findIdLeaves().map(x => x.id);
-    if (idsHere.length && !idsHere.includes(id)) {
-      await log(`${tagFor(id, date)}: aviso – ID da tela de detalhe não confere com o esperado, seguindo mesmo assim.`);
+    // espera o conteúdo específico desta aposta aparecer (não só o esqueleto da página,
+    // que carrega rápido mas pode ainda estar buscando os dados da aposta via API)
+    const idShown = await waitUntil(() => findIdLeaves().some(x => x.id === id), 10000);
+    await waitStable(12000);
+    if (!idShown) {
+      await log(`${tagFor(id, date)}: aviso – ID esperado não apareceu a tempo na tela, seguindo mesmo assim.`);
     }
     const dims = await preparePrint();
     const filename = fileStamp(date, id);
@@ -349,7 +351,7 @@
       // Acabamos de chegar (navegação direta pela URL aprendida) na tela de detalhe esperada.
       if (st.navigating) {
         const { id, date } = st.navigating;
-        const arrived = await waitUntil(isDetailPage, 6000);
+        const arrived = await waitUntil(isDetailPage, 10000);
         if (arrived) {
           try {
             const filename = await printCurrentDetail(id, date);
@@ -383,7 +385,7 @@
         scans++;
         if (scans === 1 && cards.length === 0) {
           // a lista pode ainda estar carregando logo após voltar de uma aposta ou recarregar
-          await waitUntil(() => findIdLeaves().length > 0, 8000);
+          await waitUntil(() => findIdLeaves().length > 0, 12000);
           cards = findBetCards();
         }
         if (scans === 1) await log(`${cards.length} cartão(ões) de aposta reconhecido(s) nesta tela.`);
@@ -485,6 +487,6 @@
   // voltar/avançar (bfcache), caso em que o script não é reexecutado do zero, mas o evento
   // "pageshow" dispara mesmo assim.
   window.addEventListener('pageshow', () => {
-    getState().then(st => { if (st && st.running) setTimeout(run, 1200); });
+    getState().then(st => { if (st && st.running) setTimeout(run, 1800); });
   });
 })();
