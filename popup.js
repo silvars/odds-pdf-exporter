@@ -38,13 +38,70 @@ function renderLog(st) {
   el.scrollTop = el.scrollHeight;
 }
 
+function parseDdMmAaaa(text) {
+  const m = (text || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10), month = parseInt(m[2], 10), year = parseInt(m[3], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { day, month, year };
+}
+
+function renderApostasLog(st) {
+  const el = $('apostasLog');
+  el.textContent = ((st && st.log) || []).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+function setupTabs() {
+  const tabs = { tabJogos: 'panelJogos', tabApostas: 'panelApostas' };
+  for (const [tabId, panelId] of Object.entries(tabs)) {
+    $(tabId).onclick = () => {
+      for (const [tId, pId] of Object.entries(tabs)) {
+        $(tId).classList.toggle('active', tId === tabId);
+        $(pId).classList.toggle('active', pId === panelId);
+      }
+    };
+  }
+}
+
 (async () => {
-  const saved = await chrome.storage.local.get(['listText', 'expandSel', 'st']);
+  setupTabs();
+
+  const saved = await chrome.storage.local.get(['listText', 'expandSel', 'st', 'apostasDate', 'stApostas']);
   $('list').value = saved.listText || DEFAULT_LIST;
   $('sel').value = saved.expandSel || '';
+  $('apostasDate').value = saved.apostasDate || '';
   renderLog(saved.st);
+  renderApostasLog(saved.stApostas);
 
-  chrome.storage.onChanged.addListener(ch => { if (ch.st) renderLog(ch.st.newValue); });
+  chrome.storage.onChanged.addListener(ch => {
+    if (ch.st) renderLog(ch.st.newValue);
+    if (ch.stApostas) renderApostasLog(ch.stApostas.newValue);
+  });
+
+  $('apostasStart').onclick = async () => {
+    const targetDate = parseDdMmAaaa($('apostasDate').value);
+    if (!targetDate) { alert('Informe a data no formato dd/mm/aaaa, ex.: 16/11/2026'); return; }
+    await chrome.storage.local.set({ apostasDate: $('apostasDate').value });
+    const tab = await activeTab();
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: 'APOSTAS_PING' });
+    } catch (_) {
+      alert('Esta aba não é a página de apostas (/betting/...). Se acabou de instalar a extensão, recarregue a página (F5) e tente de novo.');
+      return;
+    }
+    chrome.tabs.sendMessage(tab.id, { type: 'APOSTAS_START', targetDate });
+  };
+  $('apostasStop').onclick = async () => {
+    const tab = await activeTab();
+    chrome.tabs.sendMessage(tab.id, { type: 'APOSTAS_STOP' }).catch(() => {});
+    const { stApostas } = await chrome.storage.local.get('stApostas');
+    if (stApostas) chrome.storage.local.set({ stApostas: { ...stApostas, running: false } });
+  };
+  $('apostasClear').onclick = async () => {
+    const { stApostas } = await chrome.storage.local.get('stApostas');
+    if (stApostas) chrome.storage.local.set({ stApostas: { ...stApostas, log: [] } });
+  };
 
   $('start').onclick = async () => {
     let items = parseList($('list').value);

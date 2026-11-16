@@ -10,25 +10,50 @@
   label { display: block; margin: 8px 0 3px; font-weight: 600; }
   .row { display: flex; gap: 8px; margin-top: 10px; }
   button { padding: 6px 12px; cursor: pointer; }
-  #start { background: #1565c0; color: #fff; border: 0; border-radius: 4px; }
-  #log { margin-top: 10px; height: 130px; overflow: auto; background: #f5f5f5; padding: 6px; white-space: pre-wrap; font: 11px ui-monospace, monospace; }
+  #start, #apostasStart { background: #1565c0; color: #fff; border: 0; border-radius: 4px; }
+  #log, #apostasLog { margin-top: 10px; height: 130px; overflow: auto; background: #f5f5f5; padding: 6px; white-space: pre-wrap; font: 11px ui-monospace, monospace; }
   small { color: #666; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+  .tab { flex: 1; padding: 6px 0; background: #eee; border: 0; border-radius: 4px; cursor: pointer; }
+  .tab.active { background: #1565c0; color: #fff; }
+  .panel { display: none; }
+  .panel.active { display: block; }
 </style>
 </head>
 <body>
   <h1>Odds PDF Exporter</h1>
-  <small>Abra a página da lista de jogos e cole abaixo, uma linha por jogo: <b>05. Holanda × Grécia</b></small>
-  <label for="list">Lista de jogos</label>
-  <textarea id="list"></textarea>
-  <label for="sel">Seletor CSS extra para expandir mercados (opcional)</label>
-  <input type="text" id="sel" placeholder="ex.: [class*=market-header]">
-  <label><input type="checkbox" id="test"> Modo teste (só o primeiro jogo da lista)</label>
-  <div class="row">
-    <button id="start">Iniciar</button>
-    <button id="stop">Parar</button>
-    <button id="clear">Limpar log</button>
+  <div class="tabs">
+    <button id="tabJogos" class="tab active">Jogos</button>
+    <button id="tabApostas" class="tab">Apostas</button>
   </div>
-  <div id="log"></div>
+
+  <div id="panelJogos" class="panel active">
+    <small>Abra a página da lista de jogos e cole abaixo, uma linha por jogo: <b>05. Holanda × Grécia</b></small>
+    <label for="list">Lista de jogos</label>
+    <textarea id="list"></textarea>
+    <label for="sel">Seletor CSS extra para expandir mercados (opcional)</label>
+    <input type="text" id="sel" placeholder="ex.: [class*=market-header]">
+    <label><input type="checkbox" id="test"> Modo teste (só o primeiro jogo da lista)</label>
+    <div class="row">
+      <button id="start">Iniciar</button>
+      <button id="stop">Parar</button>
+      <button id="clear">Limpar log</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div id="panelApostas" class="panel">
+    <small>Abra a página do histórico de apostas (<b>/betting/bets-history</b>), informe a data desejada e a extensão entra em cada aposta daquele dia, salvando um PDF por aposta (ex.: <b>2026-11-16_12-29_398896726.pdf</b>).</small>
+    <label for="apostasDate">Data das apostas</label>
+    <input type="text" id="apostasDate" placeholder="dd/mm/aaaa, ex.: 16/11/2026">
+    <div class="row">
+      <button id="apostasStart">Iniciar</button>
+      <button id="apostasStop">Parar</button>
+      <button id="apostasClear">Limpar log</button>
+    </div>
+    <div id="apostasLog"></div>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>

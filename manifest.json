@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Odds PDF Exporter",
   "version": "1.0.0",
-  "description": "Abre cada jogo de uma lista na página de apostas e salva um PDF por jogo (05.pdf, 06.pdf, ...).",
+  "description": "Abre cada jogo de uma lista na página de apostas e salva um PDF por jogo (05.pdf, 06.pdf, ...). Também baixa em PDF as apostas do histórico feitas em uma data informada.",
   "permissions": ["debugger", "downloads", "storage", "tabs"],
   "background": { "service_worker": "background.js" },
   "action": { "default_popup": "popup.html", "default_title": "Odds PDF Exporter" },
@@ -10,6 +10,11 @@
     {
       "matches": ["*://*/betting/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*/betting/*"],
+      "js": ["apostas.js"],
       "run_at": "document_idle"
     }
   ]
