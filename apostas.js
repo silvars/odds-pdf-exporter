@@ -79,16 +79,24 @@
   }
   // Procura um link real (<a href>) para a tela de detalhe deste cartão: primeiro verifica se o
   // próprio cabeçalho ou algum ancestral é um link; depois procura dentro do wrapper imediato do
-  // cartão (cobre o caso comum de um link transparente sobreposto ao cartão inteiro).
-  function findDetailHref(container) {
+  // cartão (cobre o caso comum de um link transparente sobreposto ao cartão inteiro). Só aceita
+  // o link se o href contiver o próprio ID da aposta — evita pegar por engano um link de
+  // navegação qualquer (ex.: menu "Esportes" → /betting) que por acaso esteja por perto no DOM.
+  function findDetailHref(container, id) {
+    const matches = href => !!href && href.includes(id);
     let el = container;
     for (let i = 0; el && i < 10; i++, el = el.parentElement) {
-      if (el.tagName === 'A' && el.hasAttribute('href')) return el.getAttribute('href');
+      if (el.tagName === 'A') {
+        const href = el.getAttribute('href');
+        if (matches(href)) return href;
+      }
     }
     const wrap = container.parentElement;
     if (wrap) {
-      const a = wrap.querySelector('a[href]');
-      if (a) return a.getAttribute('href');
+      for (const a of wrap.querySelectorAll('a[href]')) {
+        const href = a.getAttribute('href');
+        if (matches(href)) return href;
+      }
     }
     return null;
   }
@@ -110,7 +118,7 @@
       }
       if (best) cards.push({
         dateEl: d.el, date: d.date, idEl: best.idInfo.el, id: best.idInfo.id,
-        container: best.container, href: findDetailHref(best.container)
+        container: best.container, href: findDetailHref(best.container, best.idInfo.id)
       });
     }
     return cards;
@@ -388,7 +396,7 @@
 
           // Preferência 1: link real já presente no HTML do cartão (sem precisar clicar nem adivinhar).
           let url = null;
-          if (pending.href) {
+          if (pending.href && pending.href.includes(pending.id)) {
             url = new URL(pending.href, location.href).href;
             const tmplFromHref = templateFromHref(pending.href, pending.id);
             if (tmplFromHref) await setTemplate(tmplFromHref);
@@ -398,7 +406,7 @@
             if (tmpl) url = tmpl.replace(PLACEHOLDER, pending.id);
           }
 
-          if (url) {
+          if (url && url.includes(pending.id)) {
             await setState({ navigating: { id: pending.id, date: pending.date }, listUrl: st.listUrl || location.href });
             location.href = url;
             return; // a página vai (re)carregar e o pageshow retoma o processo
